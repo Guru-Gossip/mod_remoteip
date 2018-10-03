@@ -1,0 +1,113 @@
+diff -Naur a/modules/metadata/mod_remoteip.c b/modules/metadata/mod_remoteip.c
+--- a/modules/metadata/mod_remoteip.c   2018-06-06 21:04:45.000000000 +0200
++++ b/modules/metadata/mod_remoteip.c   2018-10-03 17:35:33.361564040 +0200
+@@ -51,6 +51,8 @@
+ typedef struct {
+     /** The header to retrieve a proxy-via IP list */
+     const char *header_name;
++    /** The header to retrieve a proto status */
++    const char *proto_header_name;
+     /** A header to record the proxied IP's
+      * (removed as the physical connection and
+      * from the proxy-via IP header value list)
+@@ -154,6 +156,7 @@
+     remoteip_config_t *config = apr_pcalloc(p, sizeof(*config));
+     config->disabled_subnets = apr_array_make(p, 1, sizeof(apr_ipsubnet_t *));
+     /* config->header_name = NULL;
++     * config->proto_header_name = NULL;
+      * config->proxies_header_name = NULL;
+      * config->proxy_protocol_enabled = NULL;
+      * config->proxy_protocol_disabled = NULL;
+@@ -173,6 +176,9 @@
+     config->header_name = server->header_name
+                         ? server->header_name
+                         : global->header_name;
++    config->proto_header_name = server->proto_header_name
++                              ? server->proto_header_name
++                              : global->proto_header_name;
+     config->proxies_header_name = server->proxies_header_name
+                                 ? server->proxies_header_name
+                                 : global->proxies_header_name;
+@@ -191,6 +197,15 @@
+     return NULL;
+ }
+
++static const char *proto_header_name_set(cmd_parms *cmd, void *dummy,
++                                         const char *arg)
++{
++    remoteip_config_t *config = ap_get_module_config(cmd->server->module_config,
++                                                     &remoteip_module);
++    config->proto_header_name = arg;
++    return NULL;
++}
++
+ static const char *proxies_header_name_set(cmd_parms *cmd, void *dummy,
+                                            const char *arg)
+ {
+@@ -529,6 +544,7 @@
+
+     apr_status_t rv;
+     char *remote;
++    char *proto;
+     char *proxy_ips = NULL;
+     char *parse_remote;
+     char *eos;
+@@ -571,6 +587,15 @@
+         internal = (void *) 1;
+     }
+
++    proto = (char *) apr_table_get(r->headers_in, config->proto_header_name);
++    if (proto) {
++        proto = apr_pstrdup(r->pool, proto);
++        if (strcasecmp(proto, "on") == 0
++            || strcasecmp(proto, "https") == 0) {
++            apr_table_setn(r->notes, "remoteip_proto", "https");
++        }
++    }
++
+     remote = (char *) apr_table_get(r->headers_in, config->header_name);
+     if (!remote) {
+         return OK;
+@@ -1194,11 +1219,34 @@
+     return ap_get_brigade(f->next, bb_out, mode, block, readbytes);
+ }
+
++/*
++ * Rewrite http scheme to https if proxy sets the proto_header_name to https
++ */
++static const char *remoteip_http_scheme(const request_rec *r)
++{
++    const char *proto = NULL;
++
++    proto = apr_table_get(r->notes, "remoteip_proto");
++
++    if (proto) {
++        if (strcmp(proto, "https") == 0) {
++            return "https";
++        }
++    }
++
++    /* We have no claims to make about the request scheme */
++    return NULL;
++}
++
+ static const command_rec remoteip_cmds[] =
+ {
+     AP_INIT_TAKE1("RemoteIPHeader", header_name_set, NULL, RSRC_CONF,
+                   "Specifies a request header to trust as the client IP, "
+                   "e.g. X-Forwarded-For"),
++    AP_INIT_TAKE1("RemoteIPProtoHeader", proto_header_name_set, NULL, RSRC_CONF,
++                  "Specifies a request header to detect https, "
++                  "e.g. Front-End-Https or X-Forwarded-Proto; if not given then ignore scheme, "
++                  "Expects 'On' or 'https' as header value"),
+     AP_INIT_TAKE1("RemoteIPProxiesHeader", proxies_header_name_set,
+                   NULL, RSRC_CONF,
+                   "Specifies a request header to record proxy IP's, "
+@@ -1236,6 +1284,7 @@
+     ap_hook_post_config(remoteip_hook_post_config, NULL, NULL, APR_HOOK_MIDDLE);
+     ap_hook_pre_connection(remoteip_hook_pre_connection, NULL, NULL, APR_HOOK_MIDDLE);
+     ap_hook_post_read_request(remoteip_modify_request, NULL, NULL, APR_HOOK_FIRST);
++    ap_hook_http_scheme(remoteip_http_scheme, NULL, NULL, APR_HOOK_FIRST);
+ }
+
+ AP_DECLARE_MODULE(remoteip) = {
